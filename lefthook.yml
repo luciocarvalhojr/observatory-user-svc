@@ -1,0 +1,82 @@
+pre-commit:
+  parallel: true
+  commands:
+    lint:
+      run: golangci-lint run
+      fail_text: "Install: brew install golangci-lint"
+
+    test-and-coverage:
+      run: |
+        go test -race -coverprofile=coverage.out ./... &&
+        COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%') &&
+        THRESHOLD=0 &&
+        echo "Coverage: ${COVERAGE}%" &&
+        awk -v c="$COVERAGE" -v t="$THRESHOLD" 'BEGIN { if (c+0 < t+0) { print "Coverage " c "% is below " t "% threshold"; exit 1 } }'
+
+    swagger:
+      run: |
+        swag init -g cmd/api/main.go &&
+        if [ -n "$(git status --porcelain docs/)" ]; then
+          echo "Swagger docs are out of date. Stage the updated docs/ and try again."
+          exit 1
+        fi
+      fail_text: "Install swag: go install github.com/swaggo/swag/cmd/swag@latest"
+
+    gosec:
+      run: gosec ./...
+      fail_text: "Install: go install github.com/securego/gosec/v2/cmd/gosec@v2.23.0"
+
+    govulncheck:
+      run: govulncheck ./...
+      fail_text: "Install: go install golang.org/x/vuln/cmd/govulncheck@latest"
+
+    gitleaks:
+      run: gitleaks protect --staged --redact
+      fail_text: "Install: brew install gitleaks"
+
+    no-commit-to-branch:
+      run: |
+        branch=$(git branch --show-current)
+        if [ "$branch" = "main" ]; then
+          echo "Direct commits to main are not allowed. Use a feature branch."
+          exit 1
+        fi
+
+    check-merge-conflict:
+      glob: "*.{go,yml,yaml,md,json,mod,sum}"
+      run: |
+        grep -rn "^<<<<<<< \|^=======\$\|^>>>>>>> " {staged_files} \
+          && echo "Merge conflict markers found." && exit 1 || exit 0
+
+    trailing-whitespace:
+      glob: "*.{go,yml,yaml,md,json}"
+      run: |
+        grep -En " +$" {staged_files} \
+          && echo "Trailing whitespace found." && exit 1 || exit 0
+
+    end-of-file-fixer:
+      glob: "*.{go,yml,yaml,md,json}"
+      run: |
+        rc=0
+        for f in {staged_files}; do
+          [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo "No newline at end of: $f" && rc=1
+        done
+        exit $rc
+
+    check-added-large-files:
+      run: |
+        rc=0
+        for f in {staged_files}; do
+          [ -f "$f" ] || continue
+          size=$(wc -c < "$f")
+          if [ "$size" -gt 524288 ]; then
+            echo "Large file (>512KB): $f ($(( size / 1024 ))KB)"
+            rc=1
+          fi
+        done
+        exit $rc
+
+    check-yaml:
+      glob: "*.{yml,yaml}"
+      run: yamllint -d relaxed {staged_files}
+      fail_text: "Install: brew install yamllint"

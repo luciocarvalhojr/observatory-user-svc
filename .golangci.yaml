@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://golangci-lint.run/jsonschema/golangci.v2.jsonschema.json
+
+version: "2"
+
+linters:
+  default: standard   # govet, errcheck, staticcheck, unused, ineffassign, stylecheck...
+  enable:
+    - bodyclose     # HTTP response body not closed
+    - errorlint     # incorrect error comparisons (errors.Is/As)
+    - copyloopvar   # loop variable capture bugs
+    - misspell      # typos in comments and strings
+    - revive        # better golint replacement
+
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters: [errcheck, staticcheck]

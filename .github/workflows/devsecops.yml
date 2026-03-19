@@ -1,0 +1,297 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+
+# ----- Test, lint, and verify Swagger docs -----
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .go-version
+          cache: true
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+      - name: Test
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Coverage gate (80%)
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          THRESHOLD=0   # TODO: raise to 80 when tests are written
+          echo "Coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "❌ Coverage ${COVERAGE}% is below the ${THRESHOLD}% threshold"
+            exit 1
+          fi
+          echo "✅ Coverage ${COVERAGE}% passes"
+
+      - name: Verify Swagger docs
+        run: |
+          go install github.com/swaggo/swag/cmd/swag@latest
+          swag init -g cmd/api/main.go
+          if [ -n "$(git status --porcelain docs/)" ]; then
+            echo "Swagger docs are out of date. Run 'swag init -g cmd/api/main.go' locally."
+            exit 1
+          fi
+
+# ----- Security scans: secret scanning, SAST, and SCA -----
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .go-version
+          cache: true
+
+      - name: Gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Gosec (SAST)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.23.0
+          gosec ./...
+
+      - name: Govulncheck (SCA)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+# ---- Docker scan: build image and scan with Trivy -----
+  docker-scan:
+    runs-on: ubuntu-latest
+    needs: [test-and-lint, security-scan]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image
+        run: docker build -t ${{ github.event.repository.name }}:${{ github.sha }} .
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ github.event.repository.name }}:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+# ----- Release: create GitHub release based on conventional commits -----
+  release:
+    runs-on: ubuntu-latest
+    needs: [docker-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      published: ${{ steps.release.outputs.published }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 'lts/*'
+
+      - name: Install semantic-release dependencies
+        run: |
+          npm install --no-save \
+            conventional-changelog-conventionalcommits
+
+      - name: Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BEFORE=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          npx semantic-release
+          git fetch --tags --force
+          AFTER=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "version=${AFTER#v}" >> $GITHUB_OUTPUT
+            echo "published=true" >> $GITHUB_OUTPUT
+          else
+            echo "published=false" >> $GITHUB_OUTPUT
+          fi
+
+# ----- Post-release: build/push Docker image, generate SBOM, sign image, open Helm PR -----
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      version: ${{ needs.release.outputs.version }}
+      digest: ${{ steps.build.outputs.digest }}
+      chart: ${{ steps.meta.outputs.chart }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Derive chart name
+        id: meta
+        run: |
+          echo "chart=$(echo '${{ github.repository }}' | cut -d'/' -f2)" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: docker-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.release.outputs.version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: ${{ steps.docker-meta.outputs.tags }}
+          labels: ${{ steps.docker-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan published image
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ needs.release.outputs.version }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}:${{ needs.release.outputs.version }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attach SBOM to release
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-${{ needs.release.outputs.version }}
+          path: sbom.spdx.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless via GitHub OIDC)
+        run: |
+          cosign sign --yes \
+            ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        env:
+          COSIGN_EXPERIMENTAL: 1
+
+      - name: Delete untagged versions
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ steps.meta.outputs.chart }}
+          package-type: container
+          min-versions-to-keep: 0
+          delete-only-untagged-versions: true
+
+# ----- Post-release: update Helm chart and open PR in helm-charts repo -----
+  update-helm-chart:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      contents: read
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: helm-charts
+
+      - name: Install yq
+        uses: mikefarah/yq@v4
+
+      - name: Checkout helm-charts
+        uses: actions/checkout@v4
+        with:
+          repository: luciocarvalhojr/helm-charts
+          token: ${{ steps.app-token.outputs.token }}
+          path: helm-charts
+
+      - name: Patch values.yaml and Chart.yaml
+        run: |
+          CHART=charts/${{ needs.build-and-push.outputs.chart }}
+
+          yq -i '.image.tag = "${{ needs.build-and-push.outputs.version }}"' \
+            helm-charts/${CHART}/values.yaml
+          yq -i '.image.digest = "${{ needs.build-and-push.outputs.digest }}"' \
+            helm-charts/${CHART}/values.yaml
+          yq -i '.appVersion = "${{ needs.build-and-push.outputs.version }}"' \
+            helm-charts/${CHART}/Chart.yaml
+
+          CURRENT=$(yq '.version' helm-charts/${CHART}/Chart.yaml)
+          BUMPED=$(echo "$CURRENT" | awk -F. '{print $1"."$2"."$3+1}')
+          yq -i ".version = \"$BUMPED\"" helm-charts/${CHART}/Chart.yaml
+
+      - name: Open PR on helm-charts
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: helm-charts
+          token: ${{ steps.app-token.outputs.token }}
+          branch: bump/${{ needs.build-and-push.outputs.chart }}-${{ needs.build-and-push.outputs.version }}
+          title: "chore(${{ needs.build-and-push.outputs.chart }}): bump to ${{ needs.build-and-push.outputs.version }}"
+          body: |
+            Automated bump triggered by release pipeline.
+
+            - **chart**: `${{ needs.build-and-push.outputs.chart }}`
+            - **image.tag**: `${{ needs.build-and-push.outputs.version }}`
+            - **image.digest**: `${{ needs.build-and-push.outputs.digest }}`
+
+            Merge this PR to deploy to the cluster via ArgoCD.
+          commit-message: "chore: bump ${{ needs.build-and-push.outputs.chart }} to ${{ needs.build-and-push.outputs.version }}"
+          delete-branch: true

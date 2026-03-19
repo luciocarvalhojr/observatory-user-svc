@@ -1,0 +1,51 @@
+services:
+
+  # ── PostgreSQL — user store ───────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: observatory-user-postgres
+    environment:
+      POSTGRES_USER:     user_svc
+      POSTGRES_PASSWORD: user_svc_local  #gitleaks:allow -- local-only credential
+      POSTGRES_DB:       user_svc
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./dev/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user_svc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── NATS — event bus ─────────────────────────────────────────────────
+  nats:
+    image: nats:2-alpine
+    container_name: observatory-nats
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # HTTP monitoring
+    command: ["--jetstream", "--http_port", "8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── user-svc ──────────────────────────────────────────────────────────
+  user-svc:
+    build: .
+    container_name: observatory-user-svc
+    ports:
+      - "8082:8082"
+    environment:
+      PORT:         "8082"
+      ENV:          "development"
+      DATABASE_URL: "postgres://user_svc:user_svc_local@postgres:5432/user_svc"
+      NATS_URL:     "nats://nats:4222"
+      OTLP_ENDPOINT: ""   # disable tracing locally
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy

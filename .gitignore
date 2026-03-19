@@ -1,0 +1,15 @@
+# Build output
+/user-svc
+
+# Test coverage
+coverage.out
+
+# Swagger (generated — do not edit manually)
+docs/
+
+# Local env overrides
+.env
+*.local
+
+# macOS
+.DS_Store
