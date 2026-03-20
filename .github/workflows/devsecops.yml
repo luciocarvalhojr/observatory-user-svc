@@ -247,7 +247,7 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -257,7 +257,7 @@ jobs:
         uses: mikefarah/yq@v4
 
       - name: Checkout helm-charts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: luciocarvalhojr/helm-charts
           token: ${{ steps.app-token.outputs.token }}
@@ -279,7 +279,7 @@ jobs:
           yq -i ".version = \"$BUMPED\"" helm-charts/${CHART}/Chart.yaml
 
       - name: Open PR on helm-charts
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           path: helm-charts
           token: ${{ steps.app-token.outputs.token }}
