@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/nats-io/nats.go"
 	"github.com/luciocarvalhojr/observatory-user-svc/internal/domain"
+	"github.com/nats-io/nats.go"
 )
 
+// NATS subjects for user events.
 const (
 	SubjectUserCreated = "user.created"
 	SubjectUserDeleted = "user.deleted"
