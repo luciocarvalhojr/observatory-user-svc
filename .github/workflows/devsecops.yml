@@ -90,7 +90,7 @@ jobs:
         run: docker build -t ${{ github.event.repository.name }}:${{ github.sha }} .
 
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ github.event.repository.name }}:${{ github.sha }}
           format: table
@@ -198,7 +198,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy scan published image
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository }}:${{ needs.release.outputs.version }}
           format: table
